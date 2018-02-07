@@ -73,6 +73,7 @@ typedef struct {
 #define FCGI_AUTHORIZER 2
 #define FCGI_FILTER     3
 
+
 typedef struct {
     unsigned char appStatusB3;
     unsigned char appStatusB2;
@@ -111,5 +112,44 @@ typedef struct {
     FCGI_Header header;
     FCGI_UnknownTypeBody body;
 } FCGI_UnknownTypeRecord;
+
+
+
+
+typedef struct {
+    unsigned char nameLengthB0;  /* nameLengthB0  >> 7 == 0 */
+    unsigned char valueLengthB0; /* valueLengthB0 >> 7 == 0 */
+    char data[1];
+} FCGI_NameValuePair11;
+
+typedef struct {
+    unsigned char nameLengthB0;  /* nameLengthB0  >> 7 == 0 */
+    unsigned char valueLengthB3; /* valueLengthB3 >> 7 == 1 */
+    unsigned char valueLengthB2;
+    unsigned char valueLengthB1;
+    unsigned char valueLengthB0;
+    char data[1];
+} FCGI_NameValuePair14;
+
+typedef struct {
+    unsigned char nameLengthB3;  /* nameLengthB3  >> 7 == 1 */
+    unsigned char nameLengthB2;
+    unsigned char nameLengthB1;
+    unsigned char nameLengthB0;
+    unsigned char valueLengthB0; /* valueLengthB0 >> 7 == 0 */
+    char data[1];
+} FCGI_NameValuePair41;
+
+typedef struct {
+    unsigned char nameLengthB3;  /* nameLengthB3  >> 7 == 1 */
+    unsigned char nameLengthB2;
+    unsigned char nameLengthB1;
+    unsigned char nameLengthB0;
+    unsigned char valueLengthB3; /* valueLengthB3 >> 7 == 1 */
+    unsigned char valueLengthB2;
+    unsigned char valueLengthB1;
+    unsigned char valueLengthB0;
+    char data[1];
+} FCGI_NameValuePair44;
 
 #endif
