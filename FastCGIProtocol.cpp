@@ -89,6 +89,16 @@ namespace SoraFastCGI
         SoraFCGIHeader header;
         char content[1];
 
+        static RecordBuf* Create(unsigned short reqId, unsigned char type, int contentLen)
+        {
+            RecordBuf* result = (RecordBuf*)calloc(contentLen + FCGI_HEADER_LEN, 1);
+            result->header.version = FCGI_VERSION_1;
+            result->header.RequestId(reqId);
+            result->header.ContentLength(contentLen);
+            result->header.type = type;
+            return result;
+        }
+
         static RecordBuf* Create(SoraFCGIHeader& header)
         {
             RecordBuf* result = (RecordBuf*) calloc(header.BodyLength() + FCGI_HEADER_LEN, 1);
@@ -234,12 +244,7 @@ namespace SoraFastCGI
             while (len > 0 || data == 0)
             {
                 int curlen = std::min<int>(len, 65535);
-                SoraFCGIHeader header{};
-                header.version = FCGI_VERSION_1;
-                header.RequestId(reqId_);
-                header.type = FCGI_STDOUT;
-                header.ContentLength(curlen);
-                RecordBuf* record = RecordBuf::Create(header);
+                RecordBuf* record = RecordBuf::Create(reqId_, FCGI_STDOUT, curlen);
                 if (curlen > 0)
                     memcpy(record->content, data, curlen);
                 SendBufferAndDelete(record);
@@ -255,12 +260,7 @@ namespace SoraFastCGI
 
         bool SendEndRequest(unsigned int exitcode, unsigned int statuscode)
         {
-            SoraFCGIHeader header{};
-            header.version = FCGI_VERSION_1;
-            header.RequestId(reqId_);
-            header.type = FCGI_END_REQUEST;
-            header.ContentLength(sizeof(FCGI_EndRequestBody));
-            RecordBuf* record = RecordBuf::Create(header);
+            RecordBuf* record = RecordBuf::Create(reqId_, FCGI_END_REQUEST, sizeof(FCGI_EndRequestBody));
 
             FCGI_EndRequestBody* body = (FCGI_EndRequestBody*)record->content;
             body->protocolStatus = statuscode;
