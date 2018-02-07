@@ -289,7 +289,7 @@ namespace SoraFastCGI
         {
         }
 
-        void FeedPacket(RecordBufPtr buf)
+        bool FeedPacket(RecordBufPtr buf)
         {
             bool result = true;
 
@@ -306,7 +306,15 @@ namespace SoraFastCGI
             case FCGI_STDIN:
                 result = OnStdinData(std::move(buf));
                 break;
+
+            default:
+                {
+                    LogOutput() << "ReqId:" << buf->header.RequestId() << " Unsupported type " << buf->header.type;
+                    break;
+                }
             }
+
+            return result;
         }
     };
 
@@ -356,7 +364,7 @@ namespace SoraFastCGI
             return true;
         }
 
-        void DispatchPacket()
+        bool DispatchPacket()
         {
             int reqId = currentHeader_.RequestId();
             if (workers_[reqId] == 0)
@@ -365,7 +373,7 @@ namespace SoraFastCGI
             }
             RecordBufPtr buf(RecordBuf::Create(currentHeader_));
             std::istream(&buffer_).read(buf->content, currentHeader_.BodyLength());
-            workers_[reqId]->FeedPacket(std::move(buf));
+            return workers_[reqId]->FeedPacket(std::move(buf));
         }
 
     public:
@@ -375,6 +383,12 @@ namespace SoraFastCGI
             , socket_(io_service_)
             , workers_{}
         {
+        }
+        
+        ~ProtocolClient()
+        {
+            if (socket_.is_open())
+                socket_.close();
         }
 
         asio::ip::tcp::socket& Socket()
@@ -394,7 +408,8 @@ namespace SoraFastCGI
                 if (!RecvRecordContent(yield))
                     return false;
 
-                DispatchPacket();
+                if (!DispatchPacket())
+                    return false;
             }
         }
     };
