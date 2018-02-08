@@ -8,6 +8,8 @@
 
 namespace SoraFastCGI
 {
+    static const unsigned short ushort_max = 0xffff;
+
     struct SoraFCGIHeader : FCGI_Header
     {
         unsigned int TotalLength()

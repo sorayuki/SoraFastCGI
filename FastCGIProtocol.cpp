@@ -8,7 +8,6 @@
 
 #include <boost/asio.hpp>
 #include <boost/asio/spawn.hpp>
-#include <boost/ref.hpp>
 
 #include "SoraFastCGI.h"
 
@@ -18,8 +17,6 @@ namespace asio = boost::asio;
 using boost::system::error_code;
 using boost::system::system_error;
 namespace errc = boost::system::errc;
-
-static const unsigned short ushort_max = 0xffff;
 
 #if 1
 asio::io_service log_service;
@@ -427,7 +424,7 @@ namespace SoraFastCGI
                 return false;
             }
 
-            acceptor_.listen(50, ec);
+            acceptor_.listen(ushort_max, ec);
             if (ec != errc::success)
             {
                 LogOutput() << "fail to listen on port : " << ec.message();

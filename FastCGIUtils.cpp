@@ -2,8 +2,6 @@
 
 namespace SoraFastCGI
 {
-    static const unsigned short ushort_max = 0xffff;
-
     const char* ReadKeyValuePair(const char* beginPtr, std::string& key, std::string& value)
     {
         int nameLen = 0, valueLen = 0;
