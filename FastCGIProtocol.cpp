@@ -8,16 +8,18 @@
 
 #include <boost/asio.hpp>
 #include <boost/asio/spawn.hpp>
+#include <boost/ref.hpp>
 
-#include "FastCGI.h"
+#include "SoraFastCGI.h"
+
+#include <stdio.h>
 
 namespace asio = boost::asio;
 using boost::system::error_code;
 using boost::system::system_error;
 namespace errc = boost::system::errc;
 
-asio::io_service tcp_io_service;
-asio::io_service worker_service;
+static const unsigned short ushort_max = 0xffff;
 
 #if 1
 asio::io_service log_service;
@@ -45,165 +47,75 @@ public:
 
 namespace SoraFastCGI
 {
-    struct SoraFCGIHeader : FCGI_Header
+    class IRecordSender
     {
-        int TotalLength()
-        {
-            return BodyLength() + sizeof(*this);
-        }
-
-        int BodyLength()
-        {
-            return ContentLength() + PaddingLength();
-        }
-
-        int PaddingLength()
-        {
-            return paddingLength;
-        }
-
-        int ContentLength()
-        {
-            return (contentLengthB1 << 8) | contentLengthB0;
-        }
-
-        void ContentLength(unsigned short len)
-        {
-            contentLengthB1 = len >> 8;
-            contentLengthB0 = len & 0xff;
-        }
-
-        unsigned short RequestId()
-        {
-            return (requestIdB1 << 8) | requestIdB0;
-        }
-
-        void RequestId(unsigned short id)
-        {
-            requestIdB1 = id >> 8;
-            requestIdB0 = id & 0xff;
-        }
+    public:
+        virtual bool SendBufferAndDelete(RecordBuf*) = 0;
     };
-
-    struct RecordBuf {
-        SoraFCGIHeader header;
-        char content[1];
-
-        static RecordBuf* Create(unsigned short reqId, unsigned char type, int contentLen)
-        {
-            RecordBuf* result = (RecordBuf*)calloc(contentLen + FCGI_HEADER_LEN, 1);
-            result->header.version = FCGI_VERSION_1;
-            result->header.RequestId(reqId);
-            result->header.ContentLength(contentLen);
-            result->header.type = type;
-            return result;
-        }
-
-        static RecordBuf* Create(SoraFCGIHeader& header)
-        {
-            RecordBuf* result = (RecordBuf*) calloc(header.BodyLength() + FCGI_HEADER_LEN, 1);
-            result->header = header;
-            return result;
-        }
-    };
-
-    struct RecordBufDelete
-    {
-        void operator()(RecordBuf* val) const
-        {
-            if (val) free(val);
-        }
-    };
-
-    using RecordBufPtr = std::unique_ptr < RecordBuf, RecordBufDelete > ;
-
 
     class Worker
     {
         asio::io_service& io_service_;
-        asio::ip::tcp::socket& socket_;
+        IRecordSender* sender_;
 
         std::unordered_map<std::string, std::string> params_;
         asio::streambuf stdin_buf_;
 
         int reqId_;
 
-        bool OnBeginRequest(RecordBufPtr buf)
+        bool requestRunning_;
+        bool closeOnComplete_;
+
+        void ResetBuffer()
         {
             params_.clear();
             stdin_buf_.consume(stdin_buf_.size());
+        }
+
+        bool OnBeginRequest(RecordBufPtr buf)
+        {
+            ResetBuffer();
             reqId_ = buf->header.RequestId();
+
+            FCGI_BeginRequestBody* br = (FCGI_BeginRequestBody*)buf->content;
+
+            unsigned short role = (br->roleB1 << 8) | br->roleB0;
+            if (role != FCGI_RESPONDER)
+                return false;
+
+            requestRunning_ = true;
+            closeOnComplete_ = !(br->flags & FCGI_KEEP_CONN);
+
             return true;
         }
 
         bool OnParam(RecordBufPtr buf)
         {
             int len = buf->header.ContentLength();
-            char* beginPtr = buf->content;
-            char* endPtr = buf->content + len;
+            const char* beginPtr = buf->content;
+            const char* endPtr = buf->content + len;
 
             while (beginPtr < endPtr)
             {
-                int nameLen = 0, valueLen = 0;
-                FCGI_NameValuePair11* p11 = (FCGI_NameValuePair11*)beginPtr;
-                FCGI_NameValuePair14* p14 = (FCGI_NameValuePair14*)beginPtr;
-                FCGI_NameValuePair41* p41 = (FCGI_NameValuePair41*)beginPtr;
-                FCGI_NameValuePair44* p44 = (FCGI_NameValuePair44*)beginPtr;
-                char* bodyPtr = 0;
-
-                if ((p11->nameLengthB0 >> 7) == 0 && (p11->nameLengthB0 >> 7) == 0)
-                {
-                    nameLen = p11->nameLengthB0;
-                    valueLen = p11->valueLengthB0;
-                    bodyPtr = p11->data;
-                }
-                else if ((p11->nameLengthB0 >> 7) == 0 && (p11->valueLengthB0 >> 7) == 1)
-                {
-                    nameLen = p14->nameLengthB0;
-                    valueLen = ((p14->valueLengthB3 & 0x7f) << 24)
-                        | (p14->valueLengthB2 << 16)
-                        | (p14->valueLengthB1 << 8)
-                        | (p14->valueLengthB0);
-                    bodyPtr = p14->data;
-                }
-                else if ((p41->nameLengthB3 >> 7) == 1 && (p41->valueLengthB0 >> 7) == 0)
-                {
-                    nameLen = ((p41->nameLengthB3 & 0x7f) << 24)
-                        | (p41->nameLengthB2 << 16)
-                        | (p41->nameLengthB1 << 8)
-                        | (p41->nameLengthB0);
-                    valueLen = p41->valueLengthB0;
-                    bodyPtr = p41->data;
-                }
-                else if ((p44->nameLengthB3 >> 7) == 1 && (p44->valueLengthB3 >> 7) == 1)
-                {
-                    nameLen = ((p44->nameLengthB3 & 0x7f) << 24)
-                        | (p44->nameLengthB2 << 16)
-                        | (p44->nameLengthB1 << 8)
-                        | (p44->nameLengthB0);
-                    valueLen = ((p44->valueLengthB3 & 0x7f) << 24)
-                        | (p44->valueLengthB2 << 16)
-                        | (p44->valueLengthB1 << 8)
-                        | (p44->valueLengthB0);
-                    bodyPtr = p44->data;
-                }
-                else
-                    return false;
-
                 std::string key, value;
-                key.resize(nameLen);
-                value.resize(valueLen);
-
-                std::copy(bodyPtr, bodyPtr + nameLen, key.begin());
-                bodyPtr += nameLen;
-                std::copy(bodyPtr, bodyPtr + valueLen, value.begin());
-                bodyPtr += valueLen;
-
+                const char* newBeginPtr = ReadKeyValuePair(beginPtr, key, value);
+                if (newBeginPtr == beginPtr) 
+                    return false;
+                beginPtr = newBeginPtr;
                 params_[key] = value;
-
-                beginPtr = bodyPtr;
             }
 
+            return true;
+        }
+
+        bool OnAbortRequest(RecordBufPtr buf)
+        {
+            requestRunning_ = false;
+            return true;
+        }
+
+        bool OnGetValues(RecordBufPtr buf)
+        {
             return true;
         }
 
@@ -223,19 +135,50 @@ namespace SoraFastCGI
 
         bool OnStdinComplete()
         {
-            char buf[] = "Content-type: text/plain\r\n\r\n";
+            std::stringstream ss;
+#if 0
+            ss << "Content-type: text/plain\r\n\r\n";
             SendStdout(buf, sizeof(buf) - 1);
 
-            std::stringstream ss;
             for (auto& x : params_)
             {
                 ss << x.first << " = " << x.second << '\r' << '\n';
             }
 
+#else
+            ss << "Content-type: text/html\r\n\r\n";
+            ss << "<html><body>"
+                "<head><title>calculator</title></head>"
+                "<form action=? method=POST>"
+                "<p>a=<input name='a' type='text' /></p>"
+                "<p>b=<input name='b' type='text' /></p>"
+                "<p><input type='submit' /></p>"
+                "</form>";
+
+            if (params_["REQUEST_METHOD"] == "POST")
+            {
+                std::ostream(&stdin_buf_).write("", 1);
+                std::string tmp;
+                std::getline(std::istream(&stdin_buf_), tmp);
+                int a, b;
+                if (sscanf(tmp.c_str(), "a=%d&b=%d", &a, &b) == 2)
+                {
+                    ss << "<p>" << a << "+" << b << "=" << a + b << "</p>";
+                }
+                else
+                {
+                    ss << "<p>invalid parameters</p>";
+                }
+            }
+
+            ss << "</body></html>";
+#endif
             std::string s = ss.str();
             SendStdout(s.c_str(), s.size());
             SendStdout(0, 0);
             SendEndRequest(0, FCGI_REQUEST_COMPLETE);
+
+            requestRunning_ = false;
             return true;
         }
 
@@ -243,11 +186,11 @@ namespace SoraFastCGI
         {
             while (len > 0 || data == 0)
             {
-                int curlen = std::min<int>(len, 65535);
+                int curlen = std::min<int>(len, ushort_max);
                 RecordBuf* record = RecordBuf::Create(reqId_, FCGI_STDOUT, curlen);
                 if (curlen > 0)
                     memcpy(record->content, data, curlen);
-                SendBufferAndDelete(record);
+                sender_->SendBufferAndDelete(record);
 
                 if (data == 0)
                     break;
@@ -269,23 +212,16 @@ namespace SoraFastCGI
             body->appStatusB1 = (exitcode >> 8) & 0xff;
             body->appStatusB0 = exitcode & 0xff;
 
-            SendBufferAndDelete(record);
-
-            return true;
-        }
-
-        bool SendBufferAndDelete(RecordBuf* record)
-        {
-            RecordBufPtr p(record);
-            asio::async_write(socket_, asio::buffer((char*)record, record->header.TotalLength()), asio::transfer_exactly(record->header.TotalLength()), [](const error_code& ec, int bytes){});
-
+            sender_->SendBufferAndDelete(record);
             return true;
         }
 
     public:
-        Worker(asio::io_service& io_service, asio::ip::tcp::socket& socket)
+        Worker(asio::io_service& io_service, IRecordSender* sender)
             : io_service_(io_service)
-            , socket_(socket)
+            , sender_(sender)
+            , requestRunning_{}
+            , closeOnComplete_{}
         {
         }
 
@@ -293,48 +229,75 @@ namespace SoraFastCGI
         {
             bool result = true;
 
-            switch (buf->header.type)
+            bool notProcessed = false;
+
+            if (!requestRunning_)
             {
-            case FCGI_BEGIN_REQUEST:
-                result = OnBeginRequest(std::move(buf));
-                break;
-
-            case FCGI_PARAMS:
-                result = OnParam(std::move(buf));
-                break;
-
-            case FCGI_STDIN:
-                result = OnStdinData(std::move(buf));
-                break;
-
-            default:
+                switch (buf->header.type)
                 {
-                    LogOutput() << "ReqId:" << buf->header.RequestId() << " Unsupported type " << buf->header.type;
+                case FCGI_BEGIN_REQUEST:
+                    result = OnBeginRequest(std::move(buf));
+                    break;
+                case FCGI_GET_VALUES:
+                    result = OnGetValues(std::move(buf));
+                    break;
+                default:
+                    notProcessed = true;
                     break;
                 }
+            }
+            else
+            {
+                switch (buf->header.type)
+                {
+                case FCGI_PARAMS:
+                    result = OnParam(std::move(buf));
+                    break;
+
+                case FCGI_STDIN:
+                    result = OnStdinData(std::move(buf));
+                    break;
+
+                case FCGI_ABORT_REQUEST:
+                    result = OnAbortRequest(std::move(buf));
+                    break;
+
+                default:
+                    notProcessed = true;
+                    break;
+                }
+            }
+
+            if (notProcessed)
+            {
+                LogOutput() << "ReqId:" << buf->header.RequestId() << " Unsupported type " << (int)buf->header.type;
+
+                result = true;
             }
 
             return result;
         }
     };
 
-    class ProtocolClient
+    class ProtocolClient : public IRecordSender
     {
         asio::io_service& io_service_;
         asio::ip::tcp::socket socket_;
         asio::streambuf buffer_;
         int workerId_;
 
+        asio::yield_context* yield_;
+
         SoraFCGIHeader currentHeader_;
 
-        std::array<Worker*, 65536> workers_;
+        std::array<std::unique_ptr<Worker>, 0xffff> workers_;
 
-        bool RecvHeader(asio::yield_context& yield)
+        bool RecvHeader()
         {
             if (buffer_.size() < FCGI_HEADER_LEN)
             {
                 error_code ec;
-                int receivedBytes = asio::async_read(socket_, buffer_, asio::transfer_at_least(FCGI_HEADER_LEN - buffer_.size()), yield[ec]);
+                int receivedBytes = asio::async_read(socket_, buffer_, asio::transfer_at_least(FCGI_HEADER_LEN - buffer_.size()), (*yield_)[ec]);
 
                 if (ec == asio::error::eof)
                     return false;
@@ -348,13 +311,13 @@ namespace SoraFastCGI
             return true;
         }
 
-        bool RecvRecordContent(asio::yield_context& yield)
+        bool RecvRecordContent()
         {
-            int totalLen = currentHeader_.BodyLength();
+            unsigned int totalLen = currentHeader_.BodyLength();
             if (buffer_.size() < totalLen)
             {
                 error_code ec;
-                asio::async_read(socket_, buffer_, asio::transfer_at_least(totalLen - buffer_.size()), yield[ec]);
+                asio::async_read(socket_, buffer_, asio::transfer_at_least(totalLen - buffer_.size()), (*yield_)[ec]);
                 if (ec != errc::success)
                 {
                     LogOutput() << "[" << workerId_ << "] : fail to receive content data - " << ec.message();
@@ -367,13 +330,20 @@ namespace SoraFastCGI
         bool DispatchPacket()
         {
             int reqId = currentHeader_.RequestId();
-            if (workers_[reqId] == 0)
+            if (!workers_[reqId])
             {
-                workers_[reqId] = new Worker(io_service_, socket_);
+                workers_[reqId].reset(new Worker(io_service_, this));
             }
             RecordBufPtr buf(RecordBuf::Create(currentHeader_));
             std::istream(&buffer_).read(buf->content, currentHeader_.BodyLength());
-            return workers_[reqId]->FeedPacket(std::move(buf));
+            
+            bool dispatchResult = workers_[reqId]->FeedPacket(std::move(buf));
+            if (!dispatchResult)
+            {
+                workers_[reqId].reset();
+            }
+
+            return dispatchResult;
         }
 
     public:
@@ -381,6 +351,7 @@ namespace SoraFastCGI
             : io_service_(io_service)
             , workerId_(workerId)
             , socket_(io_service_)
+            , yield_{}
             , workers_{}
         {
         }
@@ -396,21 +367,33 @@ namespace SoraFastCGI
             return socket_;
         }
 
+        bool SendBufferAndDelete(RecordBuf* record) override
+        {
+            error_code ec;
+            RecordBufPtr p(record);
+            asio::async_write(socket_, asio::buffer((char*)record, record->header.TotalLength()), asio::transfer_exactly(record->header.TotalLength()), (*yield_)[ec]);
+            return ec == errc::success;
+        }
+
         bool Start(asio::yield_context yield)
         {
+            yield_ = &yield;
+
             for (;;)
             {
-                if (!RecvHeader(yield))
+                if (!RecvHeader())
                     return false;
 
                 std::istream(&buffer_).read((char*)&currentHeader_, FCGI_HEADER_LEN);
 
-                if (!RecvRecordContent(yield))
+                if (!RecvRecordContent())
                     return false;
 
                 if (!DispatchPacket())
                     return false;
             }
+
+            yield_ = nullptr;
         }
     };
 
@@ -462,7 +445,9 @@ namespace SoraFastCGI
                 }
                 else
                 {
-                    asio::spawn(io_service_, std::bind(&ProtocolClient::Start, worker, std::placeholders::_1));
+                    io_service_.post([this, worker](){
+                        asio::spawn(io_service_, std::bind(&ProtocolClient::Start, worker, std::placeholders::_1));
+                    });
                 }
             }
         }
@@ -473,16 +458,18 @@ int main()
 {
     using namespace SoraFastCGI;
 
-    Acceptor acceptor(tcp_io_service);
-    asio::spawn(tcp_io_service, [&acceptor](asio::yield_context yield){
+    asio::io_service io_service;
+
+    Acceptor acceptor(io_service);
+    asio::spawn(io_service, [&acceptor](asio::yield_context yield){
         acceptor.Start(yield);
     });
 
     std::thread([](){ asio::io_service::work keepwork(log_service); log_service.run(); }).detach();
 
-    std::thread([]() { tcp_io_service.run(); }).detach();
-    std::thread([]() { tcp_io_service.run(); }).detach();
-    std::thread([]() { tcp_io_service.run(); }).detach();
-    tcp_io_service.run();
+    std::thread([&io_service]() { io_service.run(); }).detach();
+    std::thread([&io_service]() { io_service.run(); }).detach();
+    std::thread([&io_service]() { io_service.run(); }).detach();
+    io_service.run();
     return 0;
 }
